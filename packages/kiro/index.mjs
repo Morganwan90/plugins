@@ -576,6 +576,36 @@ const TOOL_ID = /^[a-zA-Z0-9_.:-]{1,64}$/
 // one of Kiro's own, the same each time.
 const toolID = (id) => (TOOL_ID.test(id ?? "") ? id : "t_" + createHash("sha256").update(String(id ?? "")).digest("base64url").slice(0, 32))
 
+// Kiro answers a tool named past 64 characters, or outside these, "Invalid
+// tool use format." and won't raise the limit (kirodotdev/Kiro#7684), while
+// MCP tools in Claude Code are named mcp__plugin_<plugin>_<server>__<tool>
+// (yetone/magpie#1393).
+const TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/
+
+// toolName is a tool's name as Kiro takes one: another is its head with a
+// hash of the whole name, the same each time, so the conversation's later
+// turns name it the same way. toolNames maps each such name back.
+const toolName = (name) => {
+  const n = String(name ?? "")
+  if (TOOL_NAME.test(n)) return n
+  const hash = createHash("sha256").update(n).digest("hex").slice(0, 12)
+  return n.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64 - 1 - hash.length) + "_" + hash
+}
+
+// toolNames is the name the caller knows for each tool a request names
+// that Kiro is sent under another name.
+function toolNames(req) {
+  const names = new Map()
+  const add = (n) => {
+    if (typeof n !== "string" || !n) return
+    const k = toolName(n)
+    if (k !== n) names.set(k, n)
+  }
+  for (const t of req.tools ?? []) add(t?.name)
+  for (const m of req.messages ?? []) if (Array.isArray(m.content)) for (const p of m.content) if (p?.type === "tool_use") add(p.name)
+  return names
+}
+
 function imageFormat(mediaType) {
   const t = String(mediaType ?? "").toLowerCase()
   const f = t.replace(/^image\//, "")
@@ -620,7 +650,7 @@ function buildKiro(req, model, profile, budget) {
         if (p?.type === "text" && p.text) texts.push(p.text)
         else if (p?.type === "tool_use") {
           const input = p.input && typeof p.input === "object" && !Array.isArray(p.input) ? p.input : {}
-          a.toolUses.push({ name: p.name, toolUseId: toolID(p.id), input })
+          a.toolUses.push({ name: toolName(p.name), toolUseId: toolID(p.id), input })
         }
       }
       a.content = texts.join("\n\n")
@@ -719,8 +749,9 @@ function buildKiro(req, model, profile, budget) {
   const EMPTY = { type: "object", properties: {} }
   for (const t of req.tools ?? []) {
     if (!t?.name || (t.type && t.type !== "custom" && !t.input_schema)) continue // server tools Kiro hasn't
-    offered.add(t.name)
-    tools.push({ toolSpecification: { name: t.name, description: t.description || t.name, inputSchema: { json: t.input_schema ?? EMPTY } } })
+    const name = toolName(t.name)
+    offered.add(name)
+    tools.push({ toolSpecification: { name, description: t.description || t.name, inputSchema: { json: t.input_schema ?? EMPTY } } })
   }
   for (const e of entries)
     for (const c of e.assistantResponseMessage?.toolUses ?? [])
@@ -1047,8 +1078,9 @@ const QUOTA_WORDS = /quota|insufficient|balance|credit|billing|exceeded|rate.?li
 const failedBefore = (text) => errorResponse(QUOTA_WORDS.test(text) ? 429 : 502, text)
 
 // reply answers the Messages request from Kiro's events: a stream of
-// Messages' events, or one message.
-async function reply(it, model, stream) {
+// Messages' events, or one message. names gives back the caller's name of
+// a tool Kiro was sent under another (toolNames).
+async function reply(it, model, stream, names = new Map()) {
   const id = "msg_" + randomBytes(12).toString("hex")
   if (!stream) {
     const content = []
@@ -1066,7 +1098,7 @@ async function reply(it, model, stream) {
         else add({ type: "thinking", thinking: e.text, signature: "" })
       } else if (e.kind === "sig") {
         if (last?.type === "thinking") last.signature += e.text
-      } else if (e.kind === "toolStart") add({ type: "tool_use", id: e.id, name: e.name, input: "" })
+      } else if (e.kind === "toolStart") add({ type: "tool_use", id: e.id, name: names.get(e.name) ?? e.name, input: "" })
       else if (e.kind === "toolArgs") {
         if (last?.type === "tool_use") last.input += e.text
       } else if (e.kind === "error") {
@@ -1127,7 +1159,7 @@ async function reply(it, model, stream) {
           if (open === "thinking") ctl.enqueue(sse("content_block_delta", { index, delta: { type: "signature_delta", signature: e.text } }))
           break
         case "toolStart":
-          begin("tool", { type: "tool_use", id: e.id, name: e.name, input: {} })
+          begin("tool", { type: "tool_use", id: e.id, name: names.get(e.name) ?? e.name, input: {} })
           break
         case "toolArgs":
           if (open === "tool") ctl.enqueue(sse("content_block_delta", { index, delta: { type: "input_json_delta", partial_json: e.text } }))
@@ -1189,7 +1221,7 @@ async function generate(creds, auth, req, signal) {
     const f = failure(res.status, (await res.text()).slice(0, 1 << 20))
     return errorResponse(f.status, f.message)
   }
-  return kept(await reply(events(res.body, model, budget), model, req.stream === true))
+  return kept(await reply(events(res.body, model, budget), model, req.stream === true, toolNames(req)))
 }
 
 // ---- signing in ----------------------------------------------------------------------
@@ -1453,4 +1485,4 @@ export async function KiroAuthPlugin({ client } = {}) {
 }
 
 // for tests
-export const _internal = { generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, thinking, readCLI, readIDE, regionOf, planName, frames }
+export const _internal = { generate, refresh, usageOf, buildKiro, events, reply, failure, toolID, toolName, toolNames, thinking, readCLI, readIDE, regionOf, planName, frames }

@@ -73,7 +73,9 @@ request:
   - The system prompt goes at the head of the first message.
   - Tool calls and results are paired: an unanswered call gets an error
     result, and a result longer than 250,000 characters is cut.
-  - Tool ids Kiro wouldn't take are rewritten.
+  - Tool ids Kiro wouldn't take are rewritten. A tool name over 64
+    characters (an MCP plugin's, in Claude Code) is sent shortened with a
+    hash and its calls come back under the full name.
   - Only the latest images are sent.
   - Tools the history used but the request doesn't offer are declared.
 - It turns the AWS event stream Kiro answers with back into Messages'
