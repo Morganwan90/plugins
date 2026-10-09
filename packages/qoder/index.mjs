@@ -708,8 +708,13 @@ function failure(status, text) {
   } catch {}
   msg ||= STATUS_CODES[status] ?? `HTTP ${status}`
   // a refused chat is the built-in's 401, which never marked the account
-  // lapsed: only a refused refresh did (errorResponse says kept)
-  if (status === 401 || status === 403) return { status: 401, message: "the sign-in lapsed — sign in again" }
+  // lapsed: only a refused refresh did (errorResponse says kept). Qoder's
+  // own words go with it: a 401 right after signing in isn't a lapsed
+  // sign-in, and its reason is what says what is (Yayoi_no_yume on X).
+  if (status === 401 || status === 403) {
+    const said = msg && msg !== STATUS_CODES[status] ? ` (Qoder said ${status}: ${msg.slice(0, 300)})` : ""
+    return { status: 401, message: "the sign-in lapsed — sign in again" + said }
+  }
   if (status === 429 || msg.toLowerCase().includes("quota")) return { status: 429, message: "usage limit reached: " + msg }
   return { status, message: msg }
 }
