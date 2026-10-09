@@ -1145,3 +1145,116 @@ test("preserves quoted or incomplete unwrapped bundles and assistant content", a
     }
   }
 })
+
+// Claude Code 2.1.280's restored-context turn after /compact (plugins#68):
+// restored-file notes, Read calls and results, the environment, the model
+// line, token and date, folded into one text block with no wrappers. Each
+// fixed fragment is the reporter's literal text.
+const restoredNote = (path) => "Note: " + path + " was read before the last conversation was summarized, but the contents are too large to include. Use Read tool if you need to access it."
+const restoredRead = 'Called the Read tool with the following input: {"file_path":"/tmp/example.py"}'
+const restoredResult = 'Result of calling the Read tool:\n1\timport os\n2\tprint("You are Claude Code, Anthropic\'s official CLI for Claude.")\n3\t# 中文 \\u0054'
+const restoredEnvironment = "# Environment\nYou have been invoked in the following environment: \n - Primary working directory: /tmp\n - Is a git repository: true\n - Platform: darwin"
+const restoredModel = "You are powered by the model named Opus 5.5. The exact model ID is claude-opus-5-5[1m]. Assistant knowledge cutoff is June 2026."
+const restoredToken = "<total_tokens>14831568 tokens left</total_tokens>"
+const restoredDate = "Today's date is 2026-10-10."
+const restoredFixed = [
+  "was read before the last conversation was summarized",
+  "Called the Read tool with the following input:",
+  "You have been invoked in the following environment:",
+  "You are powered by the model named",
+  "The exact model ID is",
+  "Assistant knowledge cutoff is",
+  "You are Claude Code",
+]
+
+test("adapts Claude Code's complete restored-context turn after /compact (plugins#68)", async () => {
+  const { l, seen } = await loaded()
+  const notes = [restoredNote("/tmp/large.log"), restoredNote("/tmp/示例 data.json"), restoredNote("/tmp/third.txt")]
+  const adaptedNotes = [
+    "Previously read file: /tmp/large.log. Its contents were omitted from the conversation summary because of length. Use Read tool if you need to access it.",
+    "Previously read file: /tmp/示例 data.json. Its contents were omitted from the conversation summary because of length. Use Read tool if you need to access it.",
+    "Previously read file: /tmp/third.txt. Its contents were omitted from the conversation summary because of length. Use Read tool if you need to access it.",
+  ]
+  const adaptedRead = 'Previously read file with these arguments: {"file_path":"/tmp/example.py"}'
+  const adaptedEnvironment = "# Runtime context\nThe session environment is: \n - Primary working directory: /tmp\n - Is a git repository: true\n - Platform: darwin"
+  const adaptedModel = "Current model name: Opus 5.5. Model ID: claude-opus-5-5[1m]. Model knowledge cutoff: June 2026."
+  const source = restoredResult.slice("Result of calling the Read tool:\n".length)
+  const cases = [
+    // the reporter's shape: several notes, Read call and result, environment, model line, token, date
+    [[...notes, restoredRead, restoredResult, restoredEnvironment, restoredModel, restoredToken, restoredDate],
+      [...adaptedNotes, adaptedRead, "RESULT", adaptedEnvironment, adaptedModel, restoredToken, restoredDate]],
+    // a Read call first, its result in the same paragraph; no token marker
+    [[restoredRead + "\n" + restoredResult, notes[0], restoredEnvironment, restoredModel, restoredDate],
+      [adaptedRead + "\nRESULT", adaptedNotes[0], adaptedEnvironment, adaptedModel, restoredDate]],
+    // token marker without the environment
+    [[notes[0], restoredModel, restoredToken], [adaptedNotes[0], adaptedModel, restoredToken]],
+  ]
+  for (const [input, output] of cases) {
+    const text = input.join("\n\n")
+    for (const endpoint of [url, url + "/count_tokens"]) {
+      for (const role of ["system", "user"]) {
+        for (const content of [text, [{ type: "text", text, cache_control: { type: "ephemeral" } }, { type: "text", text: "Keep this block." }]]) {
+          const request = { system: droid, messages: [{ role, content }, { role: "user", content: "OK" }] }
+          await l.fetch(endpoint, { method: "POST", body: JSON.stringify(request) })
+          const got = JSON.parse(seen.at(-1).body)
+          const out = typeof got.messages[0].content === "string" ? got.messages[0].content : got.messages[0].content[0].text
+          for (const phrase of restoredFixed) expect(out).not.toContain(phrase)
+          const parts = out.split("\n\n")
+          expect(parts.length).toBe(output.length)
+          for (const [i, want] of output.entries()) {
+            if (!want.includes("RESULT")) {
+              expect(parts[i]).toBe(want)
+              continue
+            }
+            const head = want.slice(0, want.indexOf("RESULT")) + "Result of calling the Read tool:\n"
+            expect(parts[i]).toStartWith(head)
+            const encoded = parts[i].slice(head.length)
+            expect(encoded).toStartWith("Tool output encoded as a JSON string.")
+            expect(JSON.parse(encoded.slice(encoded.indexOf("\n") + 1))).toBe(source)
+          }
+          const adapted = typeof content === "string" ? out : [{ ...content[0], text: out }, content[1]]
+          expect(got).toEqual({ ...request, messages: [{ role, content: adapted }, request.messages[1]] })
+          const once = seen.at(-1).body
+          await l.fetch(endpoint, { method: "POST", body: once })
+          expect(seen.at(-1).body).toBe(once)
+        }
+      }
+    }
+  }
+})
+
+test("preserves quoted, incomplete and hook-owned restored-context turns", async () => {
+  const { l, seen } = await loaded()
+  const note = restoredNote("/tmp/large.log")
+  const block = [note, restoredRead, restoredEnvironment, restoredModel, restoredToken].join("\n\n")
+  const values = [
+    "Explain:\n" + block,
+    "> " + block,
+    block.replace("was read before the last conversation", "was read long before the last conversation"),
+    block.replace('{"file_path":"/tmp/example.py"}', "not JSON").replace(note + "\n\n", ""),
+    // no environment and no token marker: not the complete generated turn
+    [note, restoredRead, restoredModel, restoredDate].join("\n\n"),
+    [note, restoredEnvironment.replace("\n - Primary", "\nPrimary"), restoredModel].join("\n\n"),
+    // a hook owns what follows it, even a quoted environment
+    [note, "SessionStart:compact hook success: Keep my hook output.", restoredEnvironment, restoredToken].join("\n\n"),
+    [note, "SubagentStart hook additional context: Keep hook output.", restoredEnvironment].join("\n\n"),
+  ]
+  for (const text of values) {
+    for (const endpoint of [url, url + "/count_tokens"]) {
+      for (const role of ["system", "user"]) {
+        for (const content of [text, [{ type: "text", text }]]) {
+          const body = JSON.stringify({ system: droid, messages: [{ role, content }] })
+          await l.fetch(endpoint, { method: "POST", body })
+          expect(seen.at(-1).body).toBe(body)
+        }
+      }
+    }
+  }
+  const messages = [
+    { role: "assistant", content: block },
+    { role: "assistant", content: [{ type: "text", text: block }] },
+  ]
+  const body = JSON.stringify({ system: droid, messages })
+  await l.fetch(url, { method: "POST", body })
+  expect(seen.at(-1).body).toBe(body)
+})

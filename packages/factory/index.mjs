@@ -685,6 +685,8 @@ const SYSTEM_SKILL_CONTEXT = /^The following skills are available for use with t
 function systemContext(text) {
   text = changedFileContext(text)
   text = announcedSkills(text)
+  const restored = restoredContext(text)
+  if (restored !== null) return restored
   if (SYSTEM_TOKEN_OPENING.test(text) || SYSTEM_SKILL_CONTEXT.test(text)) return announcedContext(text)
   if (HOOK_OUTPUT.test(text) || text.startsWith(DEFERRED_TOOLS_OPENING)) {
     const at = text.indexOf(HOOK_CONTEXT)
@@ -714,11 +716,11 @@ function announcedSkills(text) {
 // Claude Code also announces several reminders as one system turn, with
 // token context and no system-reminder wrappers. Only known metadata
 // paragraphs change; numbered file contents and the hook's own output stay.
-function announcedContext(text) {
+function announcedContext(text, start = 1) {
   const parts = changedFileContext(text).split(/\n\n(?!\.\.\. \[)/)
   const open = "<system-reminder>\n", close = "\n</system-reminder>"
   let quoteChangedFiles = true
-  for (let i = 1; i < parts.length; i++) {
+  for (let i = start; i < parts.length; i++) {
     const part = parts[i]
     const hook = part.replace(/^<system-reminder>\n/, "")
     if (HOOK_OUTPUT.test(hook)) break
@@ -745,6 +747,28 @@ function announcedContext(text) {
     }
   }
   return parts.join("\n\n")
+}
+
+// After /compact, Claude Code (2.1.280) sends the files it restores and the
+// session's runtime context as one turn without reminder wrappers or an
+// opening token marker: restored-file notes, Read calls and their results,
+// the environment, the model line, token and date. Each fixed fragment is
+// refused on its own (plugins#68). Require the generated restored-file
+// opening and the generated environment paragraph or a token marker before
+// the first hook; then each paragraph is adapted as in a token-prefixed
+// bundle, the rest kept byte-for-byte. An adapted block no longer opens
+// with the generated note, so a second pass leaves it as it is.
+function restoredContext(text) {
+  const parts = text.split(/\n\n(?!\.\.\. \[)/)
+  const result = parts[0].indexOf("\n" + READ_RESULT_HEADER)
+  const opening = "<system-reminder>\n" + (result < 0 ? parts[0] : parts[0].slice(0, result)) + "\n</system-reminder>"
+  if (!COMPACT_FILE.test(opening) && !COMPACT_READ.test(opening)) return null
+  if (compactContext(opening) === opening) return null
+  for (const part of parts.slice(1)) {
+    if (HOOK_NOTIFICATION.test(part.replace(/^<system-reminder>\n/, ""))) return null
+    if (SYSTEM_ENV_CONTEXT.test(part + "\n") || /^<total_tokens>\d+ tokens left<\/total_tokens>$/.test(part)) return announcedContext(text, 0)
+  }
+  return null
 }
 
 function generatedContext(text) {
@@ -801,6 +825,8 @@ function compactContext(text, quoteChangedFiles = true) {
   // A translating gateway can fold an announced system turn into user text.
   if (SYSTEM_TOKEN_OPENING.test(text) || SYSTEM_SKILL_CONTEXT.test(text)) return announcedContext(text)
   if (HOOK_OUTPUT.test(text) || text.startsWith(DEFERRED_TOOLS_OPENING)) return systemContext(text)
+  const restored = restoredContext(text)
+  if (restored !== null) return restored
   const result = readResultText(text)
   if (result !== null) return result
   const changedFile = quoteChangedFiles && text.startsWith("<system-reminder>\n") ? changedFileText(text) : null
