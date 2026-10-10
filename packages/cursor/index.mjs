@@ -405,8 +405,12 @@ async function usage(tok, ids) {
     return bucket.has(model) || firstParty(model)
   }
   // Auto is always one, so the pool's list is never empty (which would
-  // count every model)
-  const pool = [...new Set(["auto", ...ids, ...(data.autoBucketModels ?? [])])].filter(inPool)
+  // count every model). A model listed at its context sizes (grok-4.7@256k)
+  // is still asked for by its bare name (grok-4.7) where it was picked
+  // before the list had sizes, and runs as its default, so the pool names
+  // that too (Will on Discord)
+  const asked = ids.flatMap((id) => [id, id.replace(/@[^@]*$/, "")])
+  const pool = [...new Set(["auto", ...asked, ...(data.autoBucketModels ?? [])])].filter(inPool)
   const num = (v) => (typeof v === "number" ? v : 0)
   // the two pools fit the line; the total goes in its tooltip
   return {

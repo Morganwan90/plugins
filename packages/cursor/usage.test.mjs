@@ -100,6 +100,18 @@ for (const bucket of [["default", "composer-2.5", "cursor-grok-4.5-high", "futur
   })
 }
 
+// Will on Discord: the list has grok-4.7 only at its sizes, a routing group
+// still asks for bare grok-4.7, and it was counted in Other Models (used up)
+test("a model asked for by its bare name counts in the pool its sized ids are in", async () => {
+  const { u } = await run(auth, () =>
+    Response.json({ billingCycleEnd: "1792833042000", planUsage: { autoPercentUsed: 16, apiPercentUsed: 100, totalPercentUsed: 60 } }),
+  )
+  const [cursor, other] = u.windows
+  for (const m of ["grok-4.7", "Grok-4.7"]) expect([m, counts(cursor, m), counts(other, m)]).toEqual([m, true, false])
+  // a bare other model stays in Other Models
+  expect(["claude-opus-5-5", counts(cursor, "claude-opus-5-5"), counts(other, "claude-opus-5-5")]).toEqual(["claude-opus-5-5", false, true])
+})
+
 test("an enterprise plan's spend is no window", async () => {
   expect((await run(fresh(), () => Response.json({ spendLimitUsage: {} }))).u).toEqual({ windows: [], signIn: "kept" })
 })
