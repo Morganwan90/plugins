@@ -38,6 +38,18 @@ plugin's `fetch` answers them on Cursor's agent API:
 - Each request is one `agent.v1.AgentService/Run`, a Connect stream both
   ways over HTTP/2, with the CLI's headers (`x-cursor-client-type: cli`,
   its version, privacy mode on).
+- Where HTTP/2 can't open a Run (an error before its response, or none in
+  15 s: a proxy or network that blocks HTTP/2), it goes as Cursor's clients
+  run it without HTTP/2: `agent.v1.AgentService/RunSSE` down and a
+  `aiserver.v1.BidiService/BidiAppend` for each client message up, over
+  HTTP/1.1 on `api2.cursor.sh`, through the proxy magpie gives the request.
+  When the failure says HTTP/2 itself can't be had (no head in 15 s,
+  "h2 is not supported", no HTTP/2 in ALPN, a protocol error), the Runs
+  after it go straight to HTTP/1.1 for 10 minutes; a failed connection
+  (refused, no network) or a stream the server refused leaves the next Run
+  to try HTTP/2 again. A region error over HTTP/1.1 sends the Run back to
+  HTTP/2 at the region's agent host. A BidiAppend with no answer in 60 s
+  (more for a large one) ends the Run, as cursor-agent does.
 - The whole conversation goes each time, as AI SDK messages kept as blobs
   the server asks for. The caller's tools are MCP tools, listed in the
   system prompt; the model calls them through Cursor's `CallDynamicTool`,
